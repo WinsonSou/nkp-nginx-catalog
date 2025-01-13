@@ -1,0 +1,264 @@
+---
+apiVersion: source.toolkit.fluxcd.io/v1beta1
+kind: GitRepository
+metadata:
+  name: kubeflow-instance
+  namespace: ${releaseNamespace}
+spec:
+  interval: 1m0s
+  ref:
+    tag: v1.8.1
+  timeout: 15m0s
+  url: https://github.com/kubeflow/manifests
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1beta2
+kind: Kustomization
+metadata:
+  name: kubeflow-instance
+  namespace: ${releaseNamespace}
+spec:
+  wait: true
+  retryInterval: 5m
+  images:
+  - name: gcr.io/ml-pipeline/api-server
+    newName: quay.io/ajaynagar/kubeflow-ntnx/kfp-backend
+    newTag: 2.0.3
+  - name: gcr.io/ml-pipeline/frontend
+    newName: quay.io/ajaynagar/kubeflow-ntnx/kfp-frontend
+    newTag: 2.0.3
+  - name: gcr.io/ml-pipeline/metadata-writer
+    newName: quay.io/ajaynagar/kubeflow-ntnx/kfp-metadata-writer
+    newTag: 2.0.3
+  patches:
+  - patch: |      
+      $patch: delete   
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: ml-pipeline-ui-configmap
+  - patch: |
+      $patch: delete   
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: mlpipeline-minio-artifact
+  - patch: |
+      $patch: delete   
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: workflow-controller-configmap
+  - patch: |
+      $patch: delete 
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: kubeflow-pipelines-profile-controller-code
+  - patch: |
+      $patch: delete 
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: minio
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: minio-service
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: minio-pvc  
+  - patch: |
+      - op: replace
+        path: /spec/type
+        value: LoadBalancer
+    target:
+      kind: Service
+      name: istio-ingressgateway
+      namespace: istio-system
+  - patch: |
+     - op: add
+       path: /metadata/namespace
+       value: default
+    target:
+      kind: ConfigMap
+      name: default-install-config.*
+  - patch: | 
+      apiVersion: networking.istio.io/v1beta1
+      kind: Gateway
+      metadata:
+        name: kubeflow-gateway
+      spec:
+        servers:
+        - hosts:
+          - '*'
+          port:
+            name: http
+            number: 80
+            protocol: HTTP        
+        - hosts:
+          - '*'
+          port:
+            name: https
+            number: 443
+            protocol: HTTPS
+          tls:
+            credentialName: kubeflow-tls
+            mode: SIMPLE
+    target:
+      kind: Gateway
+      name: kubeflow-gateway
+      namespace: kubeflow
+  - patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: ml-pipeline-ui
+      spec:
+        template:
+          spec:
+            containers:
+              - name: ml-pipeline-ui
+                env:
+                  - name: AWS_ACCESS_KEY_ID
+                    valueFrom:
+                      secretKeyRef:
+                        name: mlpipeline-minio-artifact
+                        key: accesskey
+                  - name: AWS_SECRET_ACCESS_KEY
+                    valueFrom:
+                      secretKeyRef:
+                        name: mlpipeline-minio-artifact
+                        key: secretkey
+                  - name: AWS_S3_ENDPOINT
+                    valueFrom:
+                      configMapKeyRef:
+                        name: pipeline-install-config
+                        key: objStoreHost
+                  - name: AWS_REGION
+                    valueFrom:
+                      configMapKeyRef:
+                        name: pipeline-install-config
+                        key: objStoreRegion  
+    target:
+      kind: Deployment
+      name: ml-pipeline-ui
+      namespace: kubeflow
+  - patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: ml-pipeline
+      spec:
+        template:
+          spec:
+            containers:
+              - env:
+                  - name: OBJECTSTORECONFIG_HOST
+                    valueFrom:
+                      configMapKeyRef:
+                        name: pipeline-install-config
+                        key: objStoreHost
+                  - name: OBJECTSTORECONFIG_BUCKETNAME
+                    valueFrom:
+                      configMapKeyRef:
+                        name: pipeline-install-config
+                        key: bucketName
+                  - name: OBJECTSTORECONFIG_REGION
+                    valueFrom:
+                      configMapKeyRef:
+                        name: pipeline-install-config
+                        key: objStoreRegion
+                  - name: OBJECTSTORECONFIG_PORT
+                    value: ""
+                name: ml-pipeline-api-server
+    target:
+      kind: Deployment
+      name: ml-pipeline
+      namespace: kubeflow
+  - patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: metadata-writer
+      spec:
+        template:
+          metadata:
+            labels:
+              app: metadata-writer
+          spec:
+            containers:
+            - name: main
+              env:
+              - name: OBJECT_STORE_ENDPOINT
+                valueFrom:
+                  configMapKeyRef:
+                    name: pipeline-install-config
+                    key: objStoreHost
+              - name: OBJECT_STORE_BUCKET
+                valueFrom:
+                  configMapKeyRef:
+                    name: pipeline-install-config
+                    key: bucketName
+              - name: S3_COMPATIBLE_OBJECT_STORE
+                value: "true"  
+    target:
+      kind: Deployment
+      name: metadata-writer
+      namespace: kubeflow
+  - patch: |      
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: kubeflow-pipelines-profile-controller
+        namespace: kubeflow
+      spec:
+        template:
+          spec:
+            containers:
+            - name: profile-controller
+              env:
+              - name: MINIO_SERVICE_REGION
+                valueFrom:
+                  configMapKeyRef:
+                    name: pipeline-install-config
+                    key: objStoreRegion
+              - name: MINIO_SERVICE_HOST
+                valueFrom:
+                  configMapKeyRef:
+                    name: pipeline-install-config
+                    key: objStoreHost
+              - name: FRONTEND_TAG
+                value: 2.0.3
+              - name: FRONTEND_IMAGE
+                value: quay.io/ajaynagar/kubeflow-ntnx/kfp-frontend
+    target:
+      kind: Deployment
+      name: kubeflow-pipelines-profile-controller
+      namespace: kubeflow
+  - patch: |
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: pipeline-install-config
+      data:
+        bucketName: mlpipeline
+        insecure: "true"
+        objStoreHost: 10.122.7.101
+        objStoreRegion: us-east-1
+    target: 
+      kind: ConfigMap
+      name: pipeline-install-config       
+  interval: 6h
+  timeout: 15m0s
+  path: ./example
+  prune: false
+  sourceRef:
+   kind: GitRepository
+   name: kubeflow-instance
+   namespace: ${releaseNamespace}
+---
